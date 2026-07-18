@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 from pydantic import BaseModel, Field
 
+from agent.rate_limit import call_with_rate_limit_retry
 from agent.search import SearchResult
 from agent.utils import get_logger, get_domain, truncate_text, clean_whitespace
 
@@ -164,10 +165,14 @@ STRICT RULES:
                 model_name=self.model_name,
                 system_instruction=self.SYSTEM_PROMPT,
             )
-            response = model.generate_content(
-                user_message,
-                generation_config={"response_mime_type": "application/json"},
-            )
+
+            def _call():
+                return model.generate_content(
+                    user_message,
+                    generation_config={"response_mime_type": "application/json"},
+                )
+
+            response = call_with_rate_limit_retry(_call, context=f"extractor:{page.url}")
             raw_text = (response.text or "").strip()
             parsed = self._parse_json_response(raw_text)
 

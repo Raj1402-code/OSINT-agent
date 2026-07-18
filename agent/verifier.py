@@ -18,6 +18,7 @@ import google.generativeai as genai
 from pydantic import BaseModel, Field
 
 from agent.extractor import EvidenceItem
+from agent.rate_limit import call_with_rate_limit_retry
 from agent.utils import get_logger
 
 logger = get_logger(__name__)
@@ -99,10 +100,14 @@ Output ONLY valid JSON matching this schema, nothing else:
                 model_name=self.model_name,
                 system_instruction=self.SYSTEM_PROMPT,
             )
-            response = model.generate_content(
-                evidence_payload,
-                generation_config={"response_mime_type": "application/json"},
-            )
+
+            def _call():
+                return model.generate_content(
+                    evidence_payload,
+                    generation_config={"response_mime_type": "application/json"},
+                )
+
+            response = call_with_rate_limit_retry(_call, context="verifier")
             raw_text = (response.text or "").strip()
             parsed = self._parse_json_response(raw_text)
 
