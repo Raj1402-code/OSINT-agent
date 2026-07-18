@@ -4,8 +4,10 @@ streamlit>=1.38.0
 # Google Gemini API
 google-generativeai>=0.8.3
 
-# Web search (DuckDuckGo, no API key required)
-duckduckgo-search>=6.2.0
+# Web search (Tavily — real search API, works reliably from cloud/server IPs
+# unlike DuckDuckGo scraping. Free tier: 1,000 searches/month, no card needed.
+# Get a key at https://app.tavily.com)
+tavily-python>=0.5.0
 
 # Web scraping
 beautifulsoup4>=4.12.3

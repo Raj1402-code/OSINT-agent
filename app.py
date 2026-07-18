@@ -575,7 +575,10 @@ class InvestigationPipeline:
             model=settings.gemini_model,
             max_subquestions=settings.max_subquestions,
         )
-        self.searcher = WebSearcher(max_results=settings.max_search_results_per_subquestion)
+        self.searcher = WebSearcher(
+            api_key=settings.tavily_api_key,
+            max_results=settings.max_search_results_per_subquestion,
+        )
         self.scraper = PageScraper(
             user_agent=settings.scraper_user_agent,
             timeout_seconds=settings.request_timeout_seconds,

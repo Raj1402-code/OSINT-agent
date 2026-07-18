@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
@@ -47,6 +48,7 @@ class Settings(BaseModel):
 
     gemini_api_key: str = Field(..., description="Google Gemini API key.")
     gemini_model: str = Field(default="gemini-2.0-flash")
+    tavily_api_key: str = Field(default="", description="Tavily search API key.")
     max_search_results_per_subquestion: int = Field(default=5, ge=1, le=20)
     max_subquestions: int = Field(default=5, ge=1, le=10)
     request_timeout_seconds: int = Field(default=10, ge=1, le=60)
@@ -71,6 +73,18 @@ class Settings(BaseModel):
             )
         return value.strip()
 
+    @field_validator("tavily_api_key")
+    @classmethod
+    def _validate_tavily_key(cls, value: str) -> str:
+        """Ensure the Tavily search API key was actually provided."""
+        if not value or value.strip() == "" or "your-tavily-api-key-here" in value:
+            raise ValueError(
+                "TAVILY_API_KEY is missing or still set to the placeholder "
+                "value. Get a free key (1,000 searches/month, no credit card) "
+                "at https://app.tavily.com and set it in .env / Streamlit Secrets."
+            )
+        return value.strip()
+
     @classmethod
     def load(cls) -> "Settings":
         """Build a Settings instance from the current process environment."""
@@ -78,6 +92,7 @@ class Settings(BaseModel):
             return cls(
                 gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
                 gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+                tavily_api_key=os.environ.get("TAVILY_API_KEY", ""),
                 max_search_results_per_subquestion=int(
                     os.environ.get("MAX_SEARCH_RESULTS_PER_SUBQUESTION", 5)
                 ),
@@ -144,3 +159,73 @@ def clean_whitespace(text: str) -> str:
 def safe_source_id(index: int) -> str:
     """Generate a stable citation id like S1, S2, ... for source numbering."""
     return f"S{index}"
+
+
+# --------------------------------------------------------------------------
+# Gemini rate-limit retry helper
+# --------------------------------------------------------------------------
+_RETRY_SECONDS_PATTERN = re.compile(r"retry in ([\d.]+)\s*s", re.IGNORECASE)
+_RETRY_DELAY_SECONDS_PATTERN = re.compile(r"seconds:\s*(\d+)")
+
+
+def _parse_retry_delay_seconds(error_message: str, default_wait: float) -> float:
+    """Pull the server-suggested wait time out of a Gemini 429 error message.
+
+    Gemini's rate-limit errors include a human-readable "Please retry in
+    38.17s" plus a structured "retry_delay { seconds: 38 }" block. We check
+    both formats and fall back to `default_wait` if neither is found.
+    """
+    match = _RETRY_SECONDS_PATTERN.search(error_message)
+    if match:
+        try:
+            return float(match.group(1)) + 1.0  # small safety buffer
+        except ValueError:
+            pass
+    match = _RETRY_DELAY_SECONDS_PATTERN.search(error_message)
+    if match:
+        try:
+            return float(match.group(1)) + 1.0
+        except ValueError:
+            pass
+    return default_wait
+
+
+def call_gemini_with_backoff(
+    model,
+    content,
+    generation_config: dict | None = None,
+    max_retries: int = 3,
+    default_wait: float = 15.0,
+):
+    """Call model.generate_content(), automatically waiting and retrying if
+    Gemini returns a 429 rate-limit / quota-exceeded error.
+
+    On a 429, Gemini tells us exactly how long to wait before retrying — we
+    read that from the error message and sleep for that long (plus a small
+    buffer) instead of giving up immediately. Any non-rate-limit error is
+    re-raised right away so callers' existing error handling still applies.
+    """
+    logger = get_logger("agent.retry")
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            if generation_config is not None:
+                return model.generate_content(content, generation_config=generation_config)
+            return model.generate_content(content)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            message = str(exc)
+            is_rate_limit = "429" in message or "quota" in message.lower() or "rate limit" in message.lower()
+
+            if not is_rate_limit or attempt == max_retries:
+                raise
+
+            wait_seconds = _parse_retry_delay_seconds(message, default_wait)
+            logger.warning(
+                f"Rate limit hit (attempt {attempt}/{max_retries}); "
+                f"waiting {wait_seconds:.1f}s before retrying."
+            )
+            time.sleep(wait_seconds)
+
+    raise last_exc  # pragma: no cover — unreachable, satisfies type checkers
